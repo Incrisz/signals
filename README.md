@@ -13,6 +13,7 @@ uvicorn main:app --reload
 
 The service now listens on `http://127.0.0.1:8000`. Example calls:
 
+- `GET /goal-setting-completed`
 - `GET /customer-app-registration-completed`
 - `GET /customer-app-login-completed`
 - `GET /customer-app-engaged`
