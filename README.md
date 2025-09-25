@@ -1,6 +1,6 @@
 # Signals API
 
-This repo exposes several FastAPI endpoints that analyse fake Firebase engagement data and return simple boolean flags for registration, login, engagement, and retention milestones.
+This repo exposes several FastAPI endpoints that analyse static Firebase engagement data and return simple boolean flags for registration, login, engagement, and retention milestones.
 
 ## Quick start
 
