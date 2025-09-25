@@ -21,7 +21,7 @@ The service now listens on `http://127.0.0.1:8000`. Example calls:
 - `GET /customer-app-retained`
 - `GET /customer-app-retained-dropoff`
 
-All responses return a `{ "<endpoint>" : <bool> }`. The fake engagement data is in `firebase.py`; update it (or use env vars) to simulate scenarios. Conditions:
+All responses return a `{ "<endpoint>" : <bool> }`. The static engagement data is in `firebase.py`; update it (or use env vars) to simulate scenarios. Conditions:
 
 - `goal-setting-completed`: user has at least one goal in Postgres (joined `user_goals` → `goals`).
 - `customer-app-registration-completed`: user has ≥1 event, and either `totalTimeInForeground… ≥ 4` minutes or ≥4 sessions in the past 7 days.
