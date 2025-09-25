@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from fastapi import FastAPI, HTTPException
 
+from goal_setting_completed import goal_setting_completed
 from customer_app_engaged import customer_app_engaged
 from Customer_app_engagement_dropoff import customer_app_engagement_dropoff
 from customer_app_login_completed import customer_app_login_completed
@@ -11,6 +12,14 @@ from customer_app_retained import customer_app_retained
 from customer_app_retained_dropoff import customer_app_retained_dropoff
 
 app = FastAPI(title="Customer App Engagement API")
+
+
+@app.get("/goal-setting-completed")
+def goal_completed() -> dict[str, bool]:
+    try:
+        return {"goal_setting_completed": goal_setting_completed()}
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.get("/customer-app-registration-completed")

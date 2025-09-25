@@ -20,4 +20,12 @@ The service now listens on `http://127.0.0.1:8000`. Example calls:
 - `GET /customer-app-retained`
 - `GET /customer-app-retained-dropoff`
 
-All responses are simple JSON objects containing the corresponding boolean. Update `firebase.py` to tweak the sample event data or set environment variables (e.g. `PACKAGE_NAME_TEST`, `MIN_FOREGROUND_MINUTES`, `MIN_WEEKLY_SESSIONS`) before launching.
+All responses return a `{ "<endpoint>" : <bool> }`. The fake engagement data is in `firebase.py`; update it (or use env vars) to simulate scenarios. Conditions:
+
+- `goal-setting-completed`: user has at least one goal in Postgres (joined `user_goals` → `goals`).
+- `customer-app-registration-completed`: user has ≥1 event, and either `totalTimeInForeground… ≥ 4` minutes or ≥4 sessions in the past 7 days.
+- `customer-app-login-completed`: user has any event with ≥1 minute of foreground time.
+- `customer-app-engaged`: user has ≥1 event with >0 minutes in each of the last 3 consecutive weeks.
+- `customer-app-engagement-dropoff`: user had >0 minutes one week ago but no >0-minute events this week.
+- `customer-app-retained`: user has ≥1 >0-minute event in each of the last 9 consecutive weeks.
+- `customer-app-retained-dropoff`: user was active in each of the previous 9 weeks but has no >0-minute event this week.
