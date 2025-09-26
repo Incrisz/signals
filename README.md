@@ -1,6 +1,6 @@
 # Signals API
 
-FastAPI service that evaluates customer engagement signals using application events stored in Postgres. All signal logic now lives in `main.py`; map a different user by changing `DEFAULT_USER_ID` (see configuration below) or by passing `?user_id=` to each endpoint.
+FastAPI service that evaluates customer engagement signals using application events stored in Postgres. All signal logic now lives in `signals.py`; map a different user by changing `DEFAULT_USER_ID` (see configuration below) or by passing `?user_id=` to each endpoint.
 
 ## How it works (plain English)
 
@@ -22,7 +22,7 @@ FastAPI service that evaluates customer engagement signals using application eve
 python -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-uvicorn main:app --reload
+uvicorn signals:app --reload
 ```
 
 The service listens on `http://127.0.0.1:8000`. Append `?user_id=<uuid>` to target another user without editing the environment file.
