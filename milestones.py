@@ -72,26 +72,6 @@ def fetch_goal_subcategories_by_tier(user_id: str) -> Dict[str, Set[str]]:
     return tiers
 
 
-def fetch_event_goal_subcategories(events: Sequence[Dict[str, object]]) -> Set[str]:
-    package_names = {
-        str(evt.get("package_name") or evt.get("app"))
-        for evt in events
-        if evt.get("package_name") or evt.get("app")
-    }
-    if not package_names:
-        return set()
-
-    query = """
-        SELECT DISTINCT agsc."goalSubCategoriesId" AS goal_subcategory_id
-        FROM public.apps AS a
-        JOIN public.app_goal_sub_categories AS agsc ON agsc."appsId" = a.id
-        WHERE a."appId" = ANY(%s)
-    """
-
-    rows = _execute_query(query, (list(package_names),))
-    return {str(row["goal_subcategory_id"]) for row in rows if row.get("goal_subcategory_id")}
-
-
 def _tier_has_matching_events(tiers: Dict[str, Set[str]], tier_key: str, event_subcategories: Set[str]) -> bool:
     tier_subcategories = tiers.get(tier_key, set())
     if not tier_subcategories:
@@ -109,10 +89,15 @@ def build_milestone_summary(
         from signals import fetch_events  # Local import avoids circular dependency.
 
         events = fetch_events(user_id)
-    if signal_summary is None:
-        from signals import build_signal_summary  # Lazy import to avoid circular dependency at import time.
 
-        signal_summary = build_signal_summary(user_id, events=list(events))
+    events = list(events)
+
+    from signals import build_service_event_context, build_signal_summary  # pylint: disable=import-outside-toplevel
+
+    _service_events, _, package_map = build_service_event_context(user_id, events)
+
+    if signal_summary is None:
+        signal_summary = build_signal_summary(user_id, events=events)
 
     goal_setting_completed = bool(signal_summary.get("goal_setting_completed"))
     registration_completed = bool(signal_summary.get("customer_app_registration_completed"))
@@ -122,7 +107,7 @@ def build_milestone_summary(
     retention_dropoff = bool(signal_summary.get("customer_app_retained_dropoff"))
 
     tiers = fetch_goal_subcategories_by_tier(user_id)
-    event_subcategories = fetch_event_goal_subcategories(events)
+    event_subcategories = set().union(*package_map.values()) if package_map else set()
 
     tier1_active = _tier_has_matching_events(tiers, "tier1", event_subcategories)
     tier2_active = _tier_has_matching_events(tiers, "tier2", event_subcategories)
@@ -157,5 +142,4 @@ __all__ = [
     "build_milestone_summary",
     "build_milestone_summaries",
     "fetch_goal_subcategories_by_tier",
-    "fetch_event_goal_subcategories",
 ]

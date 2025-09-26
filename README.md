@@ -59,14 +59,14 @@ Response body:
 
 ## Signal definitions
 
-- **goal-setting-completed** – user has at least one goal saved in Postgres.
-- **customer-app-registration-completed** – user has events and either ≥4 minutes of foreground time in any event or ≥4 sessions in the past 7 days.
-- **customer-app-login-completed** – user has any event with ≥1 minute in the foreground.
-- **customer-app-engaged** – user has ≥1 qualifying event every week for the last 3 weeks.
-- **customer-app-engagement-dropoff** – user was active last week but not this week.
-- **customer-app-retained** – user stayed active every week for the last 9 weeks.
-- **customer-app-retained-dropoff** – user was active for the previous 9 weeks and inactive this week.
-- **signals** – convenience grouping that returns all the above flags for each user.
+- **goal-setting-completed** – user has at least one goal saved in Postgres (so we know which service app subcategories apply).
+- **customer-app-registration-completed** – at least one service-app event that belongs to the user’s goal subcategories logs ≥4 minutes of foreground time **or** appears in four distinct sessions within the past 7 days.
+- **customer-app-login-completed** – a goal-aligned service-app event records ≥1 minute in the foreground.
+- **customer-app-engaged** – goal-aligned service-app events show foreground time (>0 minutes) in each of the last 3 consecutive weeks.
+- **customer-app-engagement-dropoff** – the user had goal-aligned foreground time last week but none this week.
+- **customer-app-retained** – goal-aligned service-app events show foreground time (>0 minutes) in each of the last 9 consecutive weeks.
+- **customer-app-retained-dropoff** – the user stayed goal-aligned active for 9 straight weeks and then logged zero foreground time this week.
+- **signals** – convenience grouping that returns all the above flags (plus metadata such as raw/service event counts) for each user.
 
 ## Milestone definitions
 

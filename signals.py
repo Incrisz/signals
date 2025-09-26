@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from dotenv import load_dotenv
 from psycopg2 import pool
@@ -131,6 +131,72 @@ def _minutes_played(event: Dict[str, Any]) -> float:
 
 def fetch_events(user_id: str, *, limit: Optional[int] = None) -> List[Dict[str, Any]]:
     return fetch_user_events(user_id, limit=limit)
+
+
+def _user_goal_subcategories(user_id: str) -> Set[str]:
+    query = """
+        SELECT DISTINCT g."goalSubCategoryId" AS goal_subcategory_id
+        FROM public.user_goals AS ug
+        JOIN public.goals AS g ON g.id = ug."goalId"
+        WHERE ug."userId" = %s
+          AND g."goalSubCategoryId" IS NOT NULL
+    """
+
+    rows = _execute_query(query, (user_id,))
+    return {
+        str(row["goal_subcategory_id"])
+        for row in rows
+        if row.get("goal_subcategory_id")
+    }
+
+
+def _packages_for_subcategories(subcategories: Set[str]) -> Dict[str, Set[str]]:
+    if not subcategories:
+        return {}
+
+    query = """
+        SELECT
+            a."appId" AS app_id,
+            agsc."goalSubCategoriesId" AS goal_subcategory_id
+        FROM public.apps AS a
+        JOIN public.app_goal_sub_categories AS agsc ON agsc."appsId" = a.id
+        WHERE agsc."goalSubCategoriesId" = ANY(%s)
+    """
+
+    rows = _execute_query(query, (list(subcategories),))
+    mapping: Dict[str, Set[str]] = {}
+    for row in rows:
+        app_id = row.get("app_id")
+        subcategory = row.get("goal_subcategory_id")
+        if not app_id or not subcategory:
+            continue
+        key = str(app_id).strip().lower()
+        mapping.setdefault(key, set()).add(str(subcategory))
+    return mapping
+
+
+def build_service_event_context(
+    user_id: str,
+    events: Sequence[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], Set[str], Dict[str, Set[str]]]:
+    goal_subcategories = _user_goal_subcategories(user_id)
+    if not goal_subcategories:
+        return [], goal_subcategories, {}
+
+    package_map = _packages_for_subcategories(goal_subcategories)
+    if not package_map:
+        return [], goal_subcategories, {}
+
+    filtered: List[Dict[str, Any]] = []
+    for event in events:
+        package = str(event.get("package_name") or event.get("app") or "").strip().lower()
+        if not package:
+            continue
+        if package not in package_map:
+            continue
+        filtered.append(event)
+
+    return filtered, goal_subcategories, package_map
 
 
 def goal_setting_completed(user_id: Optional[str]) -> bool:
@@ -274,23 +340,37 @@ def customer_app_retained_dropoff(events: List[Dict[str, Any]]) -> bool:
     return previous_nine_active and current_week_inactive
 
 
-def build_signal_summary(user_id: str, *, events: Optional[List[Dict[str, Any]]] = None) -> Dict[str, bool]:
-    if events is None:
-        events = fetch_events(user_id)
-    registration = customer_app_registration_completed(events)
-    return {
-        "goal_setting_completed": goal_setting_completed(user_id),
+def build_signal_summary(
+    user_id: str,
+    *,
+    events: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    raw_events = list(events) if events is not None else fetch_events(user_id)
+    service_events, goal_subcategories, package_map = build_service_event_context(user_id, raw_events)
+
+    registration = customer_app_registration_completed(service_events)
+    goal_complete = goal_setting_completed(user_id)
+
+    summary: Dict[str, Any] = {
+        "goal_setting_completed": goal_complete,
         "customer_app_registration_completed": registration["evaluation"]["completed"],
-        "customer_app_login_completed": customer_app_login_completed(events),
-        "customer_app_engaged": customer_app_engaged(events),
-        "customer_app_engagement_dropoff": customer_app_engagement_dropoff(events),
-        "customer_app_retained": customer_app_retained(events),
-        "customer_app_retained_dropoff": customer_app_retained_dropoff(events),
+        "customer_app_login_completed": customer_app_login_completed(service_events),
+        "customer_app_engaged": customer_app_engaged(service_events),
+        "customer_app_engagement_dropoff": customer_app_engagement_dropoff(service_events),
+        "customer_app_retained": customer_app_retained(service_events),
+        "customer_app_retained_dropoff": customer_app_retained_dropoff(service_events),
+        "raw_event_count": len(raw_events),
+        "service_event_count": len(service_events),
+        "service_goal_subcategories": sorted(goal_subcategories),
+        "service_app_packages": sorted(package_map.keys()),
+        "registration_metrics": registration,
     }
 
+    return summary
 
-def build_signal_summaries(user_ids: Sequence[str]) -> Dict[str, Dict[str, bool]]:
-    results: Dict[str, Dict[str, bool]] = {}
+
+def build_signal_summaries(user_ids: Sequence[str]) -> Dict[str, Dict[str, Any]]:
+    results: Dict[str, Dict[str, Any]] = {}
     for user_id in user_ids:
         results[user_id] = build_signal_summary(user_id)
     return results
@@ -307,4 +387,5 @@ __all__ = [
     "customer_app_retained_dropoff",
     "fetch_events",
     "goal_setting_completed",
+    "build_service_event_context",
 ]
