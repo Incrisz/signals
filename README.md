@@ -29,6 +29,8 @@ The service listens on `http://127.0.0.1:8000`. Append `?user_id=<uuid>` to targ
 
 ## Available endpoints
 
+- `GET /signals` (returns all of the below in a single payload)
+
 - `GET /goal-setting-completed`
 - `GET /customer-app-registration-completed`
 - `GET /customer-app-login-completed`
@@ -36,7 +38,6 @@ The service listens on `http://127.0.0.1:8000`. Append `?user_id=<uuid>` to targ
 - `GET /customer-app-engagement-dropoff`
 - `GET /customer-app-retained`
 - `GET /customer-app-retained-dropoff`
-- `GET /signals` (returns all of the above in a single payload)
 
 Every endpoint returns a JSON payload with a single boolean flag (or, in the case of `/signals`, a dictionary of flags plus the resolved user id).
 
