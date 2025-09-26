@@ -2,6 +2,13 @@
 
 FastAPI service that evaluates customer engagement signals using application events stored in Postgres. All signal logic now lives in `main.py`; map a different user by changing `DEFAULT_USER_ID` (see configuration below) or by passing `?user_id=` to each endpoint.
 
+## How it works (plain English)
+
+- The API looks up a user ID in the `events` table and gathers **every** event tied to that user.
+- It checks how long the app was open and when that happened to decide if the user has logged in, stayed active, or dropped off.
+- It also queries the goals tables to see if the user has set up at least one goal.
+- Each endpoint turns those checks into a simple yes/no answer so non-technical teammates can read them quickly.
+
 ## Configuration
 
 1. Copy `.env.example` to `.env`.
@@ -35,13 +42,13 @@ Every endpoint returns a JSON payload with a single boolean flag (or, in the cas
 
 ## Signal definitions
 
-- **goal-setting-completed** – evaluates whether the user has at least one goal in `user_goals`/`goals`.
-- **customer-app-registration-completed** – the user has events and either accumulates ≥4 minutes of foreground time in any event or logs ≥4 sessions in the past 7 days.
-- **customer-app-login-completed** – the user has any event with ≥1 minute in the foreground.
-- **customer-app-engaged** – the user has ≥1 event with foreground time in each of the last 3 consecutive weeks.
-- **customer-app-engagement-dropoff** – the user was active last week but has no qualifying events this week.
-- **customer-app-retained** – the user stays active in each of the last 9 consecutive weeks.
-- **customer-app-retained-dropoff** – the user was active across the previous 9 weeks and became inactive this week.
-- **signals** – convenience endpoint returning all flags for the chosen user.
+- **goal-setting-completed** – says “yes” when the user has at least one goal saved in the goals tables.
+- **customer-app-registration-completed** – says “yes” when the user has used the app and either spent about 4 minutes inside or opened it in four different sessions during the last week.
+- **customer-app-login-completed** – says “yes” if any event shows the user spent at least a minute in the app.
+- **customer-app-engaged** – says “yes” if the user was active (any foreground time) every week for the past three weeks.
+- **customer-app-engagement-dropoff** – says “yes” if the user was active last week but not this week.
+- **customer-app-retained** – says “yes” if the user stayed active every week for the past nine weeks.
+- **customer-app-retained-dropoff** – says “yes” if the user was active for nine straight weeks and then stopped this week.
+- **signals** – returns all of the above flags together for the selected user.
 
 These computations rely on the Postgres `events` table columns described in `schema.sql`.
