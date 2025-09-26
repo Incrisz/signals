@@ -454,6 +454,33 @@ def signals_summary(user_id: Optional[List[str]] = Query(default=None)) -> Dict[
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@app.get("/milestones")
+def milestones_summary(user_id: Optional[List[str]] = Query(default=None)) -> Dict[str, Any]:
+    resolved_user_ids = _resolve_user_ids(user_id)
+    try:
+        from milestones import build_milestone_summary
+    except ImportError as exc:
+        raise HTTPException(status_code=500, detail=f"milestones module unavailable: {exc}") from exc
+
+    try:
+        per_user: Dict[str, Dict[str, Any]] = {}
+        for uid in resolved_user_ids:
+            signal_summary = build_signal_summary(uid)
+            milestones = build_milestone_summary(uid, signal_summary=signal_summary)
+            per_user[uid] = {
+                "user_id": uid,
+                "signals": signal_summary,
+                "milestones": milestones,
+            }
+
+        if len(per_user) == 1:
+            return next(iter(per_user.values()))
+
+        return per_user
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 __all__ = [
     "app",
     "build_signal_summary",
