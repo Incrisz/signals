@@ -3,3 +3,4 @@ tobi
 __pycache__
 key.json
 uniti-production-firebase-adminsdk-fbsvc-304a43723f.json
+.env
