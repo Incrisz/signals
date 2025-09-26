@@ -45,14 +45,14 @@ Every endpoint returns a JSON payload with a single boolean flag (or, in the cas
 
 ## Signal definitions
 
-- **goal-setting-completed** – user has at least one goal saved in Postgres (establishes Tier 1/Tier 2 context).
-- **customer-app-registration-completed** – at least one service-app event aligned with the user’s goal subcategory logs ≥4 minutes of foreground time **or** records four distinct sessions within the last 7 days.
-- **customer-app-login-completed** – a goal-aligned service-app event records ≥1 minute in the foreground.
-- **customer-app-engaged** – goal-aligned service-app events show foreground time (>0 minutes) in each of the last 3 consecutive weeks.
-- **customer-app-engagement-dropoff** – the user had goal-aligned foreground time last week but none this week.
-- **customer-app-retained** – goal-aligned service-app events show foreground time (>0 minutes) in each of the last 9 consecutive weeks.
-- **customer-app-retained-dropoff** – the user remained goal-aligned active for 9 straight weeks and then logged zero foreground time this week.
-- **signals** – returns all of the above flags plus supporting metadata (raw versus service event counts, registration metrics, etc.).
+- **goal-setting-completed** – says “yes” when the user has at least one goal saved in the goals tables.
+- **customer-app-registration-completed** – says “yes” when the user has used the app and either spent about 4 minutes inside or opened it in four different sessions during the last week.
+- **customer-app-login-completed** – says “yes” if any event shows the user spent at least a minute in the app.
+- **customer-app-engaged** – says “yes” if the user was active (any foreground time) every week for the past three weeks.
+- **customer-app-engagement-dropoff** – says “yes” if the user was active last week but not this week.
+- **customer-app-retained** – says “yes” if the user stayed active every week for the past nine weeks.
+- **customer-app-retained-dropoff** – says “yes” if the user was active for nine straight weeks and then stopped this week.
+- **signals** – returns all of the above flags together for the selected user.
 - **milestones** – bundles the signal output together with milestone flags (see below) for each requested user.
 
 These computations rely on the Postgres `events` table columns described in `schema.sql`.
