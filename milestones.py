@@ -1,102 +1,39 @@
 """Milestone evaluation tied to customer engagement signals."""
 from __future__ import annotations
 
-import os
-from typing import Dict, Iterable, List, Optional, Sequence, Set
+from typing import Dict, Optional, Sequence
 
-from dotenv import load_dotenv
-from psycopg2 import pool
-from psycopg2.extras import RealDictCursor
-
-# Ensure environment overrides match runtime configuration.
-load_dotenv(override=True)
-
-DATABASE_URL = os.getenv("DATABASE_URL")
-if not DATABASE_URL:
-    raise RuntimeError("DATABASE_URL must be configured for milestone evaluation.")
-
-_connection_pool: pool.SimpleConnectionPool | None = None
+from goal_utils import fetch_goal_subcategories_by_tier, map_packages_to_goal_subcategories
 
 
-def _get_connection_pool() -> pool.SimpleConnectionPool:
-    global _connection_pool
-    if _connection_pool is None:
-        _connection_pool = pool.SimpleConnectionPool(minconn=1, maxconn=10, dsn=DATABASE_URL)
-    return _connection_pool
+def fetch_event_goal_subcategories(events: Sequence[Dict[str, object]]) -> Dict[str, set[str]]:
+    package_names = {
+        str(evt.get("package_name") or evt.get("app") or "")
+        for evt in events
+        if evt.get("package_name") or evt.get("app")
+    }
+    if not package_names:
+        return {}
+    return map_packages_to_goal_subcategories(list(package_names))
 
 
-def _execute_query(query: str, params: Iterable[object]) -> List[Dict[str, object]]:
-    conn_pool = _get_connection_pool()
-    conn = conn_pool.getconn()
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(query, tuple(params))
-            return [dict(row) for row in cur.fetchall()]
-    finally:
-        conn_pool.putconn(conn)
-
-
-def _relationship_to_tier(relationship: Optional[str]) -> Optional[str]:
-    if relationship is None:
-        return None
-    lower = relationship.lower()
-    if lower == "primary":
-        return "tier1"
-    if lower == "secondary":
-        return "tier2"
-    if lower == "tertiary":
-        return "tier3"
-    return None
-
-
-def fetch_goal_subcategories_by_tier(user_id: str) -> Dict[str, Set[str]]:
-    query = """
-        SELECT
-            ug."relationshipType" AS relationship,
-            g."goalSubCategoryId" AS goal_subcategory_id
-        FROM public.user_goals AS ug
-        JOIN public.goals AS g ON g.id = ug."goalId"
-        WHERE ug."userId" = %s
-          AND g."goalSubCategoryId" IS NOT NULL
-    """
-
-    rows = _execute_query(query, (user_id,))
-    tiers: Dict[str, Set[str]] = {"tier1": set(), "tier2": set(), "tier3": set()}
-
-    for row in rows:
-        tier = _relationship_to_tier(row.get("relationship"))
-        subcategory = row.get("goal_subcategory_id")
-        if tier and subcategory:
-            tiers.setdefault(tier, set()).add(str(subcategory))
-
-    return tiers
-
-
-def fetch_event_goal_subcategories(user_id: str) -> Set[str]:
-    query = """
-        SELECT DISTINCT agsc."goalSubCategoriesId" AS goal_subcategory_id
-        FROM public.events AS e
-        JOIN public.apps AS a ON a."appId" = e.package_name
-        JOIN public.app_goal_sub_categories AS agsc ON agsc."appsId" = a.id
-        WHERE e.user_id = %s
-    """
-
-    rows = _execute_query(query, (user_id,))
-    return {str(row["goal_subcategory_id"]) for row in rows if row.get("goal_subcategory_id")}
-
-
-def _tier_has_matching_events(tiers: Dict[str, Set[str]], tier_key: str, event_subcategories: Set[str]) -> bool:
-    tier_subcategories = tiers.get(tier_key, set())
-    if not tier_subcategories:
+def _tier_has_matching_events(user_subcategories: set[str], event_subcategories: set[str]) -> bool:
+    if not user_subcategories or not event_subcategories:
         return False
-    return bool(tier_subcategories & event_subcategories)
+    return bool(user_subcategories & event_subcategories)
 
 
-def build_milestone_summary(user_id: str, *, signal_summary: Optional[Dict[str, bool]] = None) -> Dict[str, bool]:
+def build_milestone_summary(
+    user_id: str,
+    *,
+    signal_summary: Optional[Dict[str, bool]] = None,
+    events: Optional[Sequence[Dict[str, object]]] = None,
+) -> Dict[str, bool]:
+    from signals import build_signal_summary, fetch_events  # Local import to avoid circular dependency.
+
+    raw_events = list(events) if events is not None else fetch_events(user_id)
     if signal_summary is None:
-        from signals import build_signal_summary  # Lazy import to avoid circular dependency at import time.
-
-        signal_summary = build_signal_summary(user_id)
+        signal_summary = build_signal_summary(user_id, events=raw_events)
 
     goal_setting_completed = bool(signal_summary.get("goal_setting_completed"))
     registration_completed = bool(signal_summary.get("customer_app_registration_completed"))
@@ -106,10 +43,14 @@ def build_milestone_summary(user_id: str, *, signal_summary: Optional[Dict[str, 
     retention_dropoff = bool(signal_summary.get("customer_app_retained_dropoff"))
 
     tiers = fetch_goal_subcategories_by_tier(user_id)
-    event_subcategories = fetch_event_goal_subcategories(user_id)
+    tier1 = tiers.get("tier1", set())
+    tier2 = tiers.get("tier2", set())
 
-    tier1_active = _tier_has_matching_events(tiers, "tier1", event_subcategories)
-    tier2_active = _tier_has_matching_events(tiers, "tier2", event_subcategories)
+    package_map = fetch_event_goal_subcategories(raw_events)
+    event_subcategories = set().union(*package_map.values()) if package_map else set()
+
+    tier1_active = _tier_has_matching_events(tier1, event_subcategories)
+    tier2_active = _tier_has_matching_events(tier2, event_subcategories)
 
     return {
         "goal_setting_complete": goal_setting_completed,
@@ -127,18 +68,18 @@ def build_milestone_summary(user_id: str, *, signal_summary: Optional[Dict[str, 
 
 
 def build_milestone_summaries(user_ids: Sequence[str]) -> Dict[str, Dict[str, bool]]:
-    from signals import build_signal_summary  # Local import avoids circular reference.
+    from signals import build_signal_summary, fetch_events  # Deferred import avoids circular reference.
 
     results: Dict[str, Dict[str, bool]] = {}
     for user_id in user_ids:
-        summary = build_signal_summary(user_id)
-        results[user_id] = build_milestone_summary(user_id, signal_summary=summary)
+        events = fetch_events(user_id)
+        summary = build_signal_summary(user_id, events=events)
+        results[user_id] = build_milestone_summary(user_id, signal_summary=summary, events=events)
     return results
 
 
 __all__ = [
     "build_milestone_summary",
     "build_milestone_summaries",
-    "fetch_goal_subcategories_by_tier",
     "fetch_event_goal_subcategories",
 ]

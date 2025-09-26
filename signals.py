@@ -1,120 +1,77 @@
-"""FastAPI app exposing customer engagement signals backed by Postgres events."""
+"""Signal calculations using Firebase events and goal-aware service app filters."""
 from __future__ import annotations
 
-import os
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query
-from psycopg2 import pool
-from psycopg2.extras import RealDictCursor
-
-# Load environment variables from a local .env file when present.
-load_dotenv(override=True)
-
-DATABASE_URL = os.getenv("DATABASE_URL")
-if not DATABASE_URL:
-    raise RuntimeError("DATABASE_URL must be configured (see .env.example).")
-
-# Firebase credentials are stored in the environment for future use. They are not
-# required while Firebase data lives in the Postgres events table, but the fields
-# are declared here so the configuration surface is complete.
-FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID")
-FIREBASE_CREDENTIALS_FILE = os.getenv("FIREBASE_CREDENTIALS_FILE")
-
-# Only this identifier needs to change when testing different users.
-DEFAULT_USER_ID = os.getenv("DEFAULT_USER_ID", "").strip() or None
-
-_connection_pool: pool.SimpleConnectionPool | None = None
-app = FastAPI(title="Customer Engagement Signals")
+from firebase_client import fetch_user_events
+from goal_utils import (
+    fetch_goal_subcategories_by_tier,
+    flatten_tiers,
+    map_packages_to_goal_subcategories,
+)
+from db import execute_scalar
 
 
-def _get_connection_pool() -> pool.SimpleConnectionPool:
-    """Create (and reuse) a psycopg2 connection pool."""
-    global _connection_pool
-    if _connection_pool is None:
-        _connection_pool = pool.SimpleConnectionPool(minconn=1, maxconn=10, dsn=DATABASE_URL)
-    return _connection_pool
+def _parse_datetime(value: Any) -> Optional[datetime]:
+    if value is None:
+        return None
 
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
-def _execute_query(query: str, params: Iterable[Any]) -> List[Dict[str, Any]]:
-    """Run a SELECT query and return rows as dictionaries."""
-    conn_pool = _get_connection_pool()
-    conn = conn_pool.getconn()
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(query, tuple(params))
-            return [dict(row) for row in cur.fetchall()]
-    finally:
-        conn_pool.putconn(conn)
+    if isinstance(value, (int, float)):
+        ts = float(value)
+        if ts > 1e12:
+            ts /= 1000.0
+        return datetime.fromtimestamp(ts, tz=timezone.utc)
 
-
-def _execute_scalar(query: str, params: Iterable[Any]) -> Any:
-    """Execute a query that returns a single scalar value."""
-    conn_pool = _get_connection_pool()
-    conn = conn_pool.getconn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(query, tuple(params))
-            result = cur.fetchone()
-            return result[0] if result else None
-    finally:
-        conn_pool.putconn(conn)
-
-
-def _try_parse_datetime(value: str, formats: Iterable[str]) -> Optional[datetime]:
-    for fmt in formats:
-        try:
-            return datetime.strptime(value, fmt).replace(tzinfo=timezone.utc)
-        except ValueError:
-            continue
+    if isinstance(value, str):
+        formats = (
+            "%Y-%m-%d",
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%dT%H:%M:%S",
+            "%Y-%m-%dT%H:%M:%S.%f",
+            "%Y-%m-%dT%H:%M:%S%z",
+            "%Y-%m-%dT%H:%M:%S.%f%z",
+        )
+        for fmt in formats:
+            try:
+                parsed = datetime.strptime(value, fmt)
+                return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
     return None
 
 
 def _event_time(event: Dict[str, Any]) -> Optional[datetime]:
-    raw_last_used = event.get("last_time_used")
-    if raw_last_used is not None:
-        try:
-            ts = float(raw_last_used)
-            if ts > 1e12:
-                ts /= 1000.0
-            return datetime.fromtimestamp(ts, tz=timezone.utc)
-        except (TypeError, ValueError, OSError):
-            pass
-
-    formatted_last_used = event.get("last_time_used_formatted")
-    if isinstance(formatted_last_used, str) and formatted_last_used:
-        parsed = _try_parse_datetime(
-            formatted_last_used,
-            ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f"),
-        )
-        if parsed:
+    candidate_keys = (
+        "timestamp",
+        "event_timestamp",
+        "last_time_used",
+        "created_at",
+        "updated_at",
+        "date",
+        "last_time_used_formatted",
+    )
+    for key in candidate_keys:
+        candidate = event.get(key)
+        parsed = _parse_datetime(candidate)
+        if parsed is not None:
             return parsed
-
-    raw_date = event.get("date")
-    if isinstance(raw_date, str) and raw_date:
-        parsed = _try_parse_datetime(raw_date, ("%Y-%m-%d", "%d/%m/%Y"))
-        if parsed:
-            return parsed
-
-    created_at = event.get("created_at")
-    if isinstance(created_at, datetime):
-        return created_at if created_at.tzinfo else created_at.replace(tzinfo=timezone.utc)
-
-    updated_at = event.get("updated_at")
-    if isinstance(updated_at, datetime):
-        return updated_at if updated_at.tzinfo else updated_at.replace(tzinfo=timezone.utc)
-
     return None
 
 
 def _minutes_played(event: Dict[str, Any]) -> float:
-    for key in (
+    keys = (
         "total_time_in_foreground_minutes",
+        "totalTimeInForegroundMinutes",
         "total_time_in_foreground",
+        "totalTimeInForeground",
         "total_time_in_foreground_ms",
-    ):
+        "totalTimeInForegroundMs",
+    )
+    for key in keys:
         value = event.get(key)
         if value is None:
             continue
@@ -122,74 +79,46 @@ def _minutes_played(event: Dict[str, Any]) -> float:
             amount = float(value)
         except (TypeError, ValueError):
             continue
-        if key == "total_time_in_foreground_ms":
+        if key.endswith("Ms") or key.endswith("_ms"):
             amount /= 60000.0
         if amount > 0:
             return amount
     return 0.0
 
 
-def _resolve_user_ids(raw_user_ids: Optional[Sequence[str]]) -> List[str]:
-    candidates: List[str] = []
-
-    if raw_user_ids:
-        for raw in raw_user_ids:
-            if raw is None:
-                continue
-            for part in str(raw).split(","):
-                cleaned = part.strip()
-                if cleaned:
-                    candidates.append(cleaned)
-    elif DEFAULT_USER_ID:
-        candidates.append(DEFAULT_USER_ID)
-
-    if not candidates:
-        raise HTTPException(
-            status_code=400,
-            detail="user_id is required; set DEFAULT_USER_ID in the environment or pass ?user_id=",
-        )
-
-    deduped: List[str] = []
-    seen: set[str] = set()
-    for candidate in candidates:
-        if candidate not in seen:
-            seen.add(candidate)
-            deduped.append(candidate)
-
-    return deduped
+def fetch_events(user_id: str, *, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    return fetch_user_events(user_id, limit=limit)
 
 
-def fetch_events(user_id: str) -> List[Dict[str, Any]]:
-    query = """
-        SELECT
-            id,
-            android_version,
-            date,
-            device_model,
-            event_type,
-            is_scheduled,
-            last_time_used,
-            last_time_used_formatted,
-            package_name,
-            phone_number,
-            rank,
-            session_id,
-            total_time_in_foreground,
-            total_time_in_foreground_minutes,
-            total_time_in_foreground_ms,
-            user_id,
-            username,
-            created_at,
-            updated_at
-        FROM public.events
-        WHERE user_id = %s
-        ORDER BY COALESCE(updated_at, created_at) DESC
-    """
-    return _execute_query(query, (user_id,))
+def _filter_service_events(
+    user_id: str,
+    events: Sequence[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], Dict[str, set[str]], set[str]]:
+    tiers = fetch_goal_subcategories_by_tier(user_id)
+    user_subcategories = flatten_tiers(tiers)
+    if not user_subcategories:
+        return [], tiers, user_subcategories
 
+    package_names = {
+        str(event.get("package_name") or event.get("app") or "")
+        for event in events
+        if event.get("package_name") or event.get("app")
+    }
+    package_map = map_packages_to_goal_subcategories(list(package_names))
 
-def _fetch_events_by_user(user_ids: Sequence[str]) -> Dict[str, List[Dict[str, Any]]]:
-    return {uid: fetch_events(uid) for uid in user_ids}
+    filtered: List[Dict[str, Any]] = []
+    for event in events:
+        package = str(event.get("package_name") or event.get("app") or "")
+        subcategories = package_map.get(package, set())
+        if not subcategories:
+            continue
+        if not (subcategories & user_subcategories):
+            continue
+        event_copy = dict(event)
+        event_copy["service_goal_subcategories"] = list(subcategories)
+        filtered.append(event_copy)
+
+    return filtered, tiers, user_subcategories
 
 
 def goal_setting_completed(user_id: Optional[str]) -> bool:
@@ -209,17 +138,19 @@ def goal_setting_completed(user_id: Optional[str]) -> bool:
         )
     """.format(where_clause=where_clause)
 
-    return bool(_execute_scalar(query, params))
+    return bool(execute_scalar(query, params))
 
 
-def customer_app_login_completed(events: List[Dict[str, Any]], *, min_minutes: float = 1.0) -> bool:
+def customer_app_login_completed(events: Sequence[Dict[str, Any]], *, min_minutes: float = 1.0) -> bool:
     return any(_minutes_played(event) >= min_minutes for event in events)
 
 
 def customer_app_registration_completed(
-    events: List[Dict[str, Any]], *, min_minutes: float = 4.0, min_weekly_sessions: int = 4
+    events: Sequence[Dict[str, Any]], *, min_minutes: float = 4.0, min_weekly_sessions: int = 4
 ) -> Dict[str, Any]:
-    cutoff = datetime.now(tz=timezone.utc) - timedelta(days=7)
+    now = datetime.now(tz=timezone.utc)
+    cutoff = now - timedelta(days=7)
+
     max_minutes = max((_minutes_played(evt) for evt in events), default=0.0)
     recent_sessions: set[str] = set()
     for evt in events:
@@ -230,11 +161,13 @@ def customer_app_registration_completed(
         if not session_identifier:
             continue
         recent_sessions.add(str(session_identifier))
+
     weekly_sessions = len(recent_sessions)
     used_app = bool(events)
     meets_minutes = max_minutes >= min_minutes
     meets_sessions = weekly_sessions >= min_weekly_sessions
     completed = used_app and (meets_minutes or meets_sessions)
+
     return {
         "event_count": len(events),
         "max_minutes": max_minutes,
@@ -249,11 +182,10 @@ def customer_app_registration_completed(
             "meets_weekly_threshold": meets_sessions,
             "completed": completed,
         },
-        "events": events,
     }
 
 
-def customer_app_engaged(events: List[Dict[str, Any]]) -> bool:
+def customer_app_engaged(events: Sequence[Dict[str, Any]]) -> bool:
     now = datetime.now(tz=timezone.utc)
     week_buckets = [set() for _ in range(3)]
 
@@ -272,7 +204,7 @@ def customer_app_engaged(events: List[Dict[str, Any]]) -> bool:
     return all(bucket for bucket in week_buckets)
 
 
-def customer_app_engagement_dropoff(events: List[Dict[str, Any]]) -> bool:
+def customer_app_engagement_dropoff(events: Sequence[Dict[str, Any]]) -> bool:
     now = datetime.now(tz=timezone.utc)
     current_week_active = False
     previous_week_active = False
@@ -293,7 +225,7 @@ def customer_app_engagement_dropoff(events: List[Dict[str, Any]]) -> bool:
     return previous_week_active and not current_week_active
 
 
-def customer_app_retained(events: List[Dict[str, Any]]) -> bool:
+def customer_app_retained(events: Sequence[Dict[str, Any]]) -> bool:
     now = datetime.now(tz=timezone.utc)
     week_buckets = [set() for _ in range(9)]
 
@@ -312,7 +244,7 @@ def customer_app_retained(events: List[Dict[str, Any]]) -> bool:
     return all(bucket for bucket in week_buckets)
 
 
-def customer_app_retained_dropoff(events: List[Dict[str, Any]]) -> bool:
+def customer_app_retained_dropoff(events: Sequence[Dict[str, Any]]) -> bool:
     now = datetime.now(tz=timezone.utc)
     week_buckets = [set() for _ in range(10)]
 
@@ -333,157 +265,39 @@ def customer_app_retained_dropoff(events: List[Dict[str, Any]]) -> bool:
     return previous_nine_active and current_week_inactive
 
 
-def build_signal_summary(user_id: str) -> Dict[str, bool]:
-    events = fetch_events(user_id)
-    registration = customer_app_registration_completed(events)
+def build_signal_summary(
+    user_id: str,
+    *,
+    events: Optional[Sequence[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    raw_events = list(events) if events is not None else fetch_events(user_id)
+    service_events, tiers, _ = _filter_service_events(user_id, raw_events)
+
+    registration = customer_app_registration_completed(service_events)
+
     return {
+        "user_id": user_id,
+        "raw_event_count": len(raw_events),
+        "service_event_count": len(service_events),
         "goal_setting_completed": goal_setting_completed(user_id),
         "customer_app_registration_completed": registration["evaluation"]["completed"],
-        "customer_app_login_completed": customer_app_login_completed(events),
-        "customer_app_engaged": customer_app_engaged(events),
-        "customer_app_engagement_dropoff": customer_app_engagement_dropoff(events),
-        "customer_app_retained": customer_app_retained(events),
-        "customer_app_retained_dropoff": customer_app_retained_dropoff(events),
+        "customer_app_login_completed": customer_app_login_completed(service_events),
+        "customer_app_engaged": customer_app_engaged(service_events),
+        "customer_app_engagement_dropoff": customer_app_engagement_dropoff(service_events),
+        "customer_app_retained": customer_app_retained(service_events),
+        "customer_app_retained_dropoff": customer_app_retained_dropoff(service_events),
+        "registration_metrics": registration,
+        "service_goal_tiers": {tier: list(values) for tier, values in tiers.items()},
     }
 
 
-@app.get("/goal-setting-completed")
-def goal_setting_endpoint(user_id: Optional[List[str]] = Query(default=None)) -> Dict[str, Any]:
-    resolved_user_ids = _resolve_user_ids(user_id)
-    try:
-        per_user = {uid: goal_setting_completed(uid) for uid in resolved_user_ids}
-        value = next(iter(per_user.values())) if len(per_user) == 1 else per_user
-        return {"goal_setting_completed": value}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@app.get("/customer-app-registration-completed")
-def registration_completed_endpoint(user_id: Optional[List[str]] = Query(default=None)) -> Dict[str, Any]:
-    resolved_user_ids = _resolve_user_ids(user_id)
-    try:
-        events_by_user = _fetch_events_by_user(resolved_user_ids)
-        per_user = {
-            uid: customer_app_registration_completed(events)["evaluation"]["completed"]
-            for uid, events in events_by_user.items()
-        }
-        value = next(iter(per_user.values())) if len(per_user) == 1 else per_user
-        return {"customer_app_registration_completed": value}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@app.get("/customer-app-login-completed")
-def login_completed_endpoint(user_id: Optional[List[str]] = Query(default=None)) -> Dict[str, Any]:
-    resolved_user_ids = _resolve_user_ids(user_id)
-    try:
-        events_by_user = _fetch_events_by_user(resolved_user_ids)
-        per_user = {uid: customer_app_login_completed(events) for uid, events in events_by_user.items()}
-        value = next(iter(per_user.values())) if len(per_user) == 1 else per_user
-        return {"customer_app_login_completed": value}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@app.get("/customer-app-engaged")
-def engaged_endpoint(user_id: Optional[List[str]] = Query(default=None)) -> Dict[str, Any]:
-    resolved_user_ids = _resolve_user_ids(user_id)
-    try:
-        events_by_user = _fetch_events_by_user(resolved_user_ids)
-        per_user = {uid: customer_app_engaged(events) for uid, events in events_by_user.items()}
-        value = next(iter(per_user.values())) if len(per_user) == 1 else per_user
-        return {"customer_app_engaged": value}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@app.get("/customer-app-engagement-dropoff")
-def engagement_dropoff_endpoint(user_id: Optional[List[str]] = Query(default=None)) -> Dict[str, Any]:
-    resolved_user_ids = _resolve_user_ids(user_id)
-    try:
-        events_by_user = _fetch_events_by_user(resolved_user_ids)
-        per_user = {
-            uid: customer_app_engagement_dropoff(events)
-            for uid, events in events_by_user.items()
-        }
-        value = next(iter(per_user.values())) if len(per_user) == 1 else per_user
-        return {"customer_app_engagement_dropoff": value}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@app.get("/customer-app-retained")
-def retained_endpoint(user_id: Optional[List[str]] = Query(default=None)) -> Dict[str, Any]:
-    resolved_user_ids = _resolve_user_ids(user_id)
-    try:
-        events_by_user = _fetch_events_by_user(resolved_user_ids)
-        per_user = {uid: customer_app_retained(events) for uid, events in events_by_user.items()}
-        value = next(iter(per_user.values())) if len(per_user) == 1 else per_user
-        return {"customer_app_retained": value}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@app.get("/customer-app-retained-dropoff")
-def retained_dropoff_endpoint(user_id: Optional[List[str]] = Query(default=None)) -> Dict[str, Any]:
-    resolved_user_ids = _resolve_user_ids(user_id)
-    try:
-        events_by_user = _fetch_events_by_user(resolved_user_ids)
-        per_user = {
-            uid: customer_app_retained_dropoff(events)
-            for uid, events in events_by_user.items()
-        }
-        value = next(iter(per_user.values())) if len(per_user) == 1 else per_user
-        return {"customer_app_retained_dropoff": value}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@app.get("/signals")
-def signals_summary(user_id: Optional[List[str]] = Query(default=None)) -> Dict[str, Any]:
-    resolved_user_ids = _resolve_user_ids(user_id)
-    try:
-        if len(resolved_user_ids) == 1:
-            solo_id = resolved_user_ids[0]
-            summary = build_signal_summary(solo_id)
-            summary["user_id"] = solo_id
-            return summary
-
-        return {uid: build_signal_summary(uid) for uid in resolved_user_ids}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@app.get("/milestones")
-def milestones_summary(user_id: Optional[List[str]] = Query(default=None)) -> Dict[str, Any]:
-    resolved_user_ids = _resolve_user_ids(user_id)
-    try:
-        from milestones import build_milestone_summary
-    except ImportError as exc:
-        raise HTTPException(status_code=500, detail=f"milestones module unavailable: {exc}") from exc
-
-    try:
-        per_user: Dict[str, Dict[str, Any]] = {}
-        for uid in resolved_user_ids:
-            signal_summary = build_signal_summary(uid)
-            milestones = build_milestone_summary(uid, signal_summary=signal_summary)
-            per_user[uid] = {
-                "user_id": uid,
-                "signals": signal_summary,
-                "milestones": milestones,
-            }
-
-        if len(per_user) == 1:
-            return next(iter(per_user.values()))
-
-        return per_user
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+def build_signal_summaries(user_ids: Sequence[str]) -> Dict[str, Dict[str, Any]]:
+    return {user_id: build_signal_summary(user_id) for user_id in user_ids}
 
 
 __all__ = [
-    "app",
     "build_signal_summary",
+    "build_signal_summaries",
     "customer_app_engaged",
     "customer_app_engagement_dropoff",
     "customer_app_login_completed",
