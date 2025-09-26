@@ -1,61 +1,72 @@
-# Signals API
+# Signals & Milestones Lambda
 
-FastAPI service that evaluates customer engagement signals using application events stored in Postgres. All signal logic now lives in `signals.py`; map a different user by changing `DEFAULT_USER_ID` (see configuration below) or by passing `?user_id=` to each endpoint.
+Serverless-ready analyser that pulls engagement events from Firebase Firestore, reads goal metadata from Postgres, and produces both signal flags and milestone statuses per user. The core logic lives in `signals.py` and `milestones.py`, while `lambda_function.py` provides the AWS Lambda entrypoint.
 
 ## How it works (plain English)
 
-- The API looks up a user ID in the `events` table and gathers **every** event tied to that user.
-- It checks how long the app was open and when that happened to decide if the user has logged in, stayed active, or dropped off.
-- It also queries the goals tables to see if the user has set up at least one goal.
-- Each endpoint turns those checks into a simple yes/no answer so non-technical teammates can read them quickly.
-- If you send several user IDs (repeat the `user_id` query parameter or supply a comma-separated list), the service runs the same checks for each user and returns a per-user breakdown.
+- We pull every event for each user from the Firestore collection `app_usage_events/{userId}/events/{eventId}`.
+- We check how long and how recently each user has been in the app to derive the engagement signals (login, retention, drop-offs, etc.).
+- We read each user’s goal selections from Postgres and match event app IDs to goal subcategories to decide milestone progress.
+- The Lambda handler loops through each user ID, runs the signal logic, runs the milestone logic, and returns a combined result set.
+
+If you pass several user IDs (repeat the `user_ids` property or send a comma-separated list), the Lambda executes the same checks for each user and returns a per-user breakdown.
 
 ## Configuration
 
-1. Copy `.env.example` to `.env`.
-2. Populate `DATABASE_URL` with your Postgres connection string.
-3. Optionally fill in the Firebase placeholders for future use.
-4. Set `DEFAULT_USER_ID` to the user you want to inspect by default.
+1. Copy `.env.example` to `.env` and populate:
+   - `DATABASE_URL` for Postgres access (goal metadata).
+   - One of `FIREBASE_CREDENTIALS_FILE`, `FIREBASE_SERVICE_ACCOUNT_JSON`, or `FIREBASE_SECRET_ID` (Secrets Manager) for Firebase credentials.
+   - Optional overrides such as `FIREBASE_ROOT_COLLECTION`, `FIREBASE_EVENTS_SUBCOLLECTION`, `AWS_REGION`, and `USER_ID_LIMIT`.
+2. Install dependencies: `pip install -r requirements.txt`.
+3. For AWS Lambda, package the repository (or build a deployment layer) with these dependencies.
 
-## Quick start
+## Local execution
+
+Use the CLI helper bundled with the Lambda handler:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-uvicorn signals:app --reload
+python lambda_function.py --user-id 4fe1222a-94d9-45fd-b0f2-6856fcb1cb20
 ```
 
-The service listens on `http://127.0.0.1:8000`. Append `?user_id=<uuid>` to target another user, or pass multiple IDs (`?user_id=<uuid1>&user_id=<uuid2>` or `?user_id=<uuid1>,<uuid2>`) to receive results for each user in one response.
+You can supply multiple `--user-id` values or let it fall back to `USER_ID_LIMIT` Firestore documents. Add `--since <ISO timestamp>` to filter events loaded in memory.
 
-## Available endpoints
+## Lambda handler shape
 
-- `GET /signals` (returns all signal flags in a single payload)
-- `GET /milestones` (returns signal flags plus milestone evaluations)
+Invoke the function with a payload such as:
 
-- `GET /goal-setting-completed`
-- `GET /customer-app-registration-completed`
-- `GET /customer-app-login-completed`
-- `GET /customer-app-engaged`
-- `GET /customer-app-engagement-dropoff`
-- `GET /customer-app-retained`
-- `GET /customer-app-retained-dropoff`
+```json
+{
+  "user_ids": ["4fe1222a-94d9-45fd-b0f2-6856fcb1cb20", "another-user-id"],
+  "since_timestamp": "2024-10-01T00:00:00Z"
+}
+```
 
-Every endpoint returns a JSON payload with a single boolean flag (or, in the case of `/signals`, a dictionary of flags plus the resolved user id).
+Response body:
+
+```json
+{
+  "processed_user_ids": ["4fe1222a-94d9-45fd-b0f2-6856fcb1cb20"],
+  "results": {
+    "4fe1222a-94d9-45fd-b0f2-6856fcb1cb20": {
+      "user_id": "4fe1222a-94d9-45fd-b0f2-6856fcb1cb20",
+      "event_count": 42,
+      "signals": { "customer_app_login_completed": true, … },
+      "milestones": { "tier1_app_registered": true, … }
+    }
+  }
+}
+```
 
 ## Signal definitions
 
-- **goal-setting-completed** – says “yes” when the user has at least one goal saved in the goals tables.
-- **customer-app-registration-completed** – says “yes” when the user has used the app and either spent about 4 minutes inside or opened it in four different sessions during the last week.
-- **customer-app-login-completed** – says “yes” if any event shows the user spent at least a minute in the app.
-- **customer-app-engaged** – says “yes” if the user was active (any foreground time) every week for the past three weeks.
-- **customer-app-engagement-dropoff** – says “yes” if the user was active last week but not this week.
-- **customer-app-retained** – says “yes” if the user stayed active every week for the past nine weeks.
-- **customer-app-retained-dropoff** – says “yes” if the user was active for nine straight weeks and then stopped this week.
-- **signals** – returns all of the above flags together for the selected user.
-- **milestones** – bundles the signal output together with milestone flags (see below) for each requested user.
-
-These computations rely on the Postgres `events` table columns described in `schema.sql`.
+- **goal-setting-completed** – user has at least one goal saved in Postgres.
+- **customer-app-registration-completed** – user has events and either ≥4 minutes of foreground time in any event or ≥4 sessions in the past 7 days.
+- **customer-app-login-completed** – user has any event with ≥1 minute in the foreground.
+- **customer-app-engaged** – user has ≥1 qualifying event every week for the last 3 weeks.
+- **customer-app-engagement-dropoff** – user was active last week but not this week.
+- **customer-app-retained** – user stayed active every week for the last 9 weeks.
+- **customer-app-retained-dropoff** – user was active for the previous 9 weeks and inactive this week.
+- **signals** – convenience grouping that returns all the above flags for each user.
 
 ## Milestone definitions
 
@@ -66,4 +77,9 @@ These computations rely on the Postgres `events` table columns described in `sch
 - **tier1_app_retained / tier2_app_retained** – goal selection is complete, the retention signal is true, and events exist for the Tier 1 or Tier 2 subcategories.
 - **tier1_app_retention_dropoff / tier2_app_retention_dropoff** – goal selection is complete, the retention drop-off signal is true, and the user has events tied to the Tier 1 or Tier 2 subcategories.
 
-Milestone evaluation uses `user_goals` and `goals` to understand the Tier 1 / Tier 2 selections, and joins `events` → `apps` → `app_goal_sub_categories` to confirm the user interacted with an app that belongs to the relevant subcategory.
+Milestone evaluation uses `user_goals` and `goals` to understand Tier 1/Tier 2 selections, and joins `apps` → `app_goal_sub_categories` to confirm the user interacted with an app that belongs to the relevant subcategory.
+
+## Packaging tips
+
+- Bundle `psycopg2-binary`, `firebase-admin`, `google-cloud-firestore`, `boto3`, and their native dependencies with your Lambda deployment package or layer.
+- Ensure the Lambda role can access Secrets Manager (if you rely on `FIREBASE_SECRET_ID`) and the target Postgres instance.

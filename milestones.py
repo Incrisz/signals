@@ -72,16 +72,23 @@ def fetch_goal_subcategories_by_tier(user_id: str) -> Dict[str, Set[str]]:
     return tiers
 
 
-def fetch_event_goal_subcategories(user_id: str) -> Set[str]:
+def fetch_event_goal_subcategories(events: Sequence[Dict[str, object]]) -> Set[str]:
+    package_names = {
+        str(evt.get("package_name") or evt.get("app"))
+        for evt in events
+        if evt.get("package_name") or evt.get("app")
+    }
+    if not package_names:
+        return set()
+
     query = """
         SELECT DISTINCT agsc."goalSubCategoriesId" AS goal_subcategory_id
-        FROM public.events AS e
-        JOIN public.apps AS a ON a."appId" = e.package_name
+        FROM public.apps AS a
         JOIN public.app_goal_sub_categories AS agsc ON agsc."appsId" = a.id
-        WHERE e.user_id = %s
+        WHERE a."appId" = ANY(%s)
     """
 
-    rows = _execute_query(query, (user_id,))
+    rows = _execute_query(query, (list(package_names),))
     return {str(row["goal_subcategory_id"]) for row in rows if row.get("goal_subcategory_id")}
 
 
@@ -92,11 +99,20 @@ def _tier_has_matching_events(tiers: Dict[str, Set[str]], tier_key: str, event_s
     return bool(tier_subcategories & event_subcategories)
 
 
-def build_milestone_summary(user_id: str, *, signal_summary: Optional[Dict[str, bool]] = None) -> Dict[str, bool]:
+def build_milestone_summary(
+    user_id: str,
+    *,
+    signal_summary: Optional[Dict[str, bool]] = None,
+    events: Optional[Sequence[Dict[str, object]]] = None,
+) -> Dict[str, bool]:
+    if events is None:
+        from signals import fetch_events  # Local import avoids circular dependency.
+
+        events = fetch_events(user_id)
     if signal_summary is None:
         from signals import build_signal_summary  # Lazy import to avoid circular dependency at import time.
 
-        signal_summary = build_signal_summary(user_id)
+        signal_summary = build_signal_summary(user_id, events=list(events))
 
     goal_setting_completed = bool(signal_summary.get("goal_setting_completed"))
     registration_completed = bool(signal_summary.get("customer_app_registration_completed"))
@@ -106,7 +122,7 @@ def build_milestone_summary(user_id: str, *, signal_summary: Optional[Dict[str, 
     retention_dropoff = bool(signal_summary.get("customer_app_retained_dropoff"))
 
     tiers = fetch_goal_subcategories_by_tier(user_id)
-    event_subcategories = fetch_event_goal_subcategories(user_id)
+    event_subcategories = fetch_event_goal_subcategories(events)
 
     tier1_active = _tier_has_matching_events(tiers, "tier1", event_subcategories)
     tier2_active = _tier_has_matching_events(tiers, "tier2", event_subcategories)
@@ -127,12 +143,13 @@ def build_milestone_summary(user_id: str, *, signal_summary: Optional[Dict[str, 
 
 
 def build_milestone_summaries(user_ids: Sequence[str]) -> Dict[str, Dict[str, bool]]:
-    from signals import build_signal_summary  # Local import avoids circular reference.
+    from signals import build_signal_summary, fetch_events  # Local import avoids circular reference.
 
     results: Dict[str, Dict[str, bool]] = {}
     for user_id in user_ids:
-        summary = build_signal_summary(user_id)
-        results[user_id] = build_milestone_summary(user_id, signal_summary=summary)
+        events = fetch_events(user_id)
+        summary = build_signal_summary(user_id, events=events)
+        results[user_id] = build_milestone_summary(user_id, signal_summary=summary, events=events)
     return results
 
 
