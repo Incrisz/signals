@@ -8,6 +8,7 @@ FastAPI service that evaluates customer engagement signals using application eve
 - It checks how long the app was open and when that happened to decide if the user has logged in, stayed active, or dropped off.
 - It also queries the goals tables to see if the user has set up at least one goal.
 - Each endpoint turns those checks into a simple yes/no answer so non-technical teammates can read them quickly.
+- If you send several user IDs (repeat the `user_id` query parameter or supply a comma-separated list), the service runs the same checks for each user and returns a per-user breakdown.
 
 ## Configuration
 
@@ -25,7 +26,7 @@ pip install -r requirements.txt
 uvicorn signals:app --reload
 ```
 
-The service listens on `http://127.0.0.1:8000`. Append `?user_id=<uuid>` to target another user without editing the environment file.
+The service listens on `http://127.0.0.1:8000`. Append `?user_id=<uuid>` to target another user, or pass multiple IDs (`?user_id=<uuid1>&user_id=<uuid2>` or `?user_id=<uuid1>,<uuid2>`) to receive results for each user in one response.
 
 ## Available endpoints
 
