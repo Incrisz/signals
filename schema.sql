@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict IiXr59D4RPphNSd6DitSZtJFZFyfsqhNk3FHs53EWv56A2ywfvf1WGQHxx1Gmp8
+\restrict 4rkot97F6Rxf9SW7IrsGyyi41dhcIofoAGoThRmcXzP2Dp0Jzol9Asi2FmJ2LZo
 
 -- Dumped from database version 16.10 (Debian 16.10-1.pgdg13+1)
 -- Dumped by pg_dump version 16.10 (Ubuntu 16.10-0ubuntu0.24.04.1)
@@ -254,16 +254,51 @@ ALTER TABLE public.country_languages OWNER TO postgres;
 --
 
 CREATE TABLE public.events (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    user_id uuid NOT NULL,
-    event_type character varying(100) NOT NULL,
-    "timestamp" bigint NOT NULL,
-    data jsonb NOT NULL,
-    created_at timestamp without time zone DEFAULT now()
+    id integer NOT NULL,
+    android_version character varying(50),
+    date character varying(50),
+    device_model character varying(255),
+    event_type character varying(100),
+    is_scheduled boolean,
+    last_time_used bigint,
+    last_time_used_formatted character varying(50),
+    package_name character varying(255),
+    phone_number character varying(50),
+    rank integer,
+    session_id character varying(255),
+    total_time_in_foreground bigint,
+    total_time_in_foreground_minutes integer,
+    total_time_in_foreground_ms bigint,
+    user_id character varying(255),
+    username character varying(255),
+    created_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
+    updated_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP
 );
 
 
 ALTER TABLE public.events OWNER TO postgres;
+
+--
+-- Name: events_id_seq; Type: SEQUENCE; Schema: public; Owner: postgres
+--
+
+CREATE SEQUENCE public.events_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE public.events_id_seq OWNER TO postgres;
+
+--
+-- Name: events_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
+--
+
+ALTER SEQUENCE public.events_id_seq OWNED BY public.events.id;
+
 
 --
 -- Name: goal_categories; Type: TABLE; Schema: public; Owner: postgres
@@ -422,6 +457,21 @@ CREATE TABLE public.messages (
 ALTER TABLE public.messages OWNER TO postgres;
 
 --
+-- Name: milestone_logs; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE public.milestone_logs (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    user_id uuid NOT NULL,
+    app_id character varying(255) NOT NULL,
+    milestone_id character varying(255) NOT NULL,
+    created_at timestamp with time zone DEFAULT now()
+);
+
+
+ALTER TABLE public.milestone_logs OWNER TO postgres;
+
+--
 -- Name: rewards_issued; Type: TABLE; Schema: public; Owner: postgres
 --
 
@@ -469,30 +519,6 @@ CREATE TABLE public.user_apps (
 
 
 ALTER TABLE public.user_apps OWNER TO postgres;
-
---
--- Name: user_engagement_logs; Type: TABLE; Schema: public; Owner: postgres
---
-
-CREATE TABLE public.user_engagement_logs (
-    id uuid NOT NULL,
-    user_id character varying(255) NOT NULL,
-    data_type character varying(50) NOT NULL,
-    "timestamp" bigint NOT NULL,
-    data jsonb,
-    signal_name character varying(255),
-    signal_value numeric,
-    signal_metadata jsonb,
-    milestone_name character varying(255),
-    milestone_status character varying(50),
-    milestone_timestamp bigint,
-    milestone_metadata jsonb,
-    created_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
-    updated_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP
-);
-
-
-ALTER TABLE public.user_engagement_logs OWNER TO postgres;
 
 --
 -- Name: user_goal_categories; Type: TABLE; Schema: public; Owner: postgres
@@ -605,6 +631,13 @@ CREATE TABLE public.verifications (
 
 
 ALTER TABLE public.verifications OWNER TO postgres;
+
+--
+-- Name: events id; Type: DEFAULT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.events ALTER COLUMN id SET DEFAULT nextval('public.events_id_seq'::regclass);
+
 
 --
 -- Name: app_goal_sub_categories PK_04c0eeefd08feba8dca1c4a64ff; Type: CONSTRAINT; Schema: public; Owner: postgres
@@ -887,19 +920,19 @@ ALTER TABLE ONLY public.interventions_log
 
 
 --
+-- Name: milestone_logs milestone_logs_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.milestone_logs
+    ADD CONSTRAINT milestone_logs_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: rewards_issued rewards_issued_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
 ALTER TABLE ONLY public.rewards_issued
     ADD CONSTRAINT rewards_issued_pkey PRIMARY KEY (id);
-
-
---
--- Name: user_engagement_logs user_engagement_logs_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
---
-
-ALTER TABLE ONLY public.user_engagement_logs
-    ADD CONSTRAINT user_engagement_logs_pkey PRIMARY KEY (id);
 
 
 --
@@ -959,24 +992,24 @@ CREATE INDEX "IDX_f5217329c699f0327b2d9cb9c2" ON public.app_goals USING btree ("
 
 
 --
--- Name: idx_user_engagement_logs_data_type; Type: INDEX; Schema: public; Owner: postgres
+-- Name: idx_events_created_at; Type: INDEX; Schema: public; Owner: postgres
 --
 
-CREATE INDEX idx_user_engagement_logs_data_type ON public.user_engagement_logs USING btree (data_type);
-
-
---
--- Name: idx_user_engagement_logs_timestamp; Type: INDEX; Schema: public; Owner: postgres
---
-
-CREATE INDEX idx_user_engagement_logs_timestamp ON public.user_engagement_logs USING btree ("timestamp");
+CREATE INDEX idx_events_created_at ON public.events USING btree (created_at);
 
 
 --
--- Name: idx_user_engagement_logs_user_id; Type: INDEX; Schema: public; Owner: postgres
+-- Name: idx_events_event_type; Type: INDEX; Schema: public; Owner: postgres
 --
 
-CREATE INDEX idx_user_engagement_logs_user_id ON public.user_engagement_logs USING btree (user_id);
+CREATE INDEX idx_events_event_type ON public.events USING btree (event_type);
+
+
+--
+-- Name: idx_events_user_id; Type: INDEX; Schema: public; Owner: postgres
+--
+
+CREATE INDEX idx_events_user_id ON public.events USING btree (user_id);
 
 
 --
@@ -1215,5 +1248,5 @@ ALTER TABLE ONLY public.rewards_issued
 -- PostgreSQL database dump complete
 --
 
-\unrestrict IiXr59D4RPphNSd6DitSZtJFZFyfsqhNk3FHs53EWv56A2ywfvf1WGQHxx1Gmp8
+\unrestrict 4rkot97F6Rxf9SW7IrsGyyi41dhcIofoAGoThRmcXzP2Dp0Jzol9Asi2FmJ2LZo
 
